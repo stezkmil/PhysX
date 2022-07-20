@@ -37,11 +37,20 @@
 using namespace physx;
 using namespace Cm;
 
+int comparePointers(const void* a, const void* b)
+{
+	if (a < b) return -1;
+	if (a == b) return 0;
+	if (a > b) return 1;
+	return 0;
+}
+
 PtrTable::PtrTable()
 : mList(NULL)
 , mCount(0)
 , mOwnsMemory(true)
 , mBufferUsed(false)
+, mListAccelerator(NULL)
 {
 }
 
@@ -50,6 +59,7 @@ PtrTable::~PtrTable()
 	PX_ASSERT(mOwnsMemory);
 	PX_ASSERT(mCount == 0);
 	PX_ASSERT(mList == NULL);
+	PX_ASSERT(mListAccelerator == NULL);
 }
 
 void PtrTable::clear(PtrTableStorageManager& sm)
@@ -58,24 +68,70 @@ void PtrTable::clear(PtrTableStorageManager& sm)
 	{
 		PxU32 implicitCapacity = Ps::nextPowerOfTwo(PxU32(mCount)-1);
 		sm.deallocate(mList, sizeof(void*)*implicitCapacity);
+		sm.deallocate(mListAccelerator, sizeof(void*) * implicitCapacity);
 	}
 
 	mList = NULL;
+	mListAccelerator = NULL;
 	mOwnsMemory = true;
 	mCount = 0;
+}
+
+size_t bsearch2(
+	void const* const key,
+	void ** const base,
+	size_t            num,
+	int (* const compare)(void const*, void const*)
+)
+{
+	size_t lo = 0;
+	size_t hi = num - 1;
+
+	while (base[lo] <= base[hi])
+	{
+		size_t const half = num / 2;
+		if (half != 0)
+		{
+			size_t mid = lo + (num & 1 ? half : (half - 1));
+
+			int const result = compare(key, base[mid]);
+			if (result == 0)
+			{
+				return mid;
+			}
+			else if (result < 0)
+			{
+				num = num & 1 ? half : half - 1;
+			}
+			else
+			{
+				num = half;
+			}
+		}
+		else if (num != 0)
+		{
+			return compare(key, base[lo]) ? -1 : lo;
+		}
+		else
+		{
+			break;
+		}
+	}
+
+	return std::numeric_limits<size_t>::max();
 }
 
 PxU32 PtrTable::find(const void* ptr) const
 {
 	const PxU32 nbPtrs = mCount;
-	void*const * PX_RESTRICT ptrs = getPtrs();
 
-	for(PxU32 i=0; i<nbPtrs; i++)
+	size_t index = bsearch2(ptr, mListAccelerator, nbPtrs, comparePointers);
+	if (index == std::numeric_limits<size_t>::max())
+		return 0xffffffff;
+	else
 	{
-		if(ptrs[i] == ptr)
-			return i;
+		return static_cast<PxU32>(index);
 	}
-	return 0xffffffff;
 }
 
 void PtrTable::exportExtraData(PxSerializationContext& stream)
@@ -91,6 +147,8 @@ void PtrTable::importExtraData(PxDeserializationContext& context)
 {
 	if(mCount>1)
 		mList = context.readExtraData<void*, PX_SERIAL_ALIGN>(mCount);
+	PxMemCopy(mListAccelerator, mList, mCount * sizeof(void*));
+	qsort(mListAccelerator, mCount, sizeof(void*), comparePointers);
 }
 
 void PtrTable::realloc(PxU32 oldCapacity, PxU32 newCapacity, PtrTableStorageManager& sm)
@@ -104,10 +162,17 @@ void PtrTable::realloc(PxU32 oldCapacity, PxU32 newCapacity, PtrTableStorageMana
 	void** newMem = sm.allocate(newCapacity * sizeof(void*));
 	PxMemCopy(newMem, mList, mCount * sizeof(void*));
 
-	if(mOwnsMemory)
-		sm.deallocate(mList, oldCapacity*sizeof(void*));
+	void** newMemAccel = sm.allocate(newCapacity * sizeof(void*));
+	PxMemCopy(newMemAccel, mListAccelerator, mCount * sizeof(void*));
+
+	if (mOwnsMemory)
+	{
+		sm.deallocate(mList, oldCapacity * sizeof(void*));
+		sm.deallocate(mListAccelerator, oldCapacity * sizeof(void*));
+	}
 
 	mList = newMem;
+	mListAccelerator = newMemAccel;
 	mOwnsMemory = true;
 }
 
@@ -117,8 +182,11 @@ void PtrTable::add(void* ptr, PtrTableStorageManager& sm)
 	{
 		PX_ASSERT(mOwnsMemory);
 		PX_ASSERT(mList == NULL);
+		PX_ASSERT(mListAccelerator == NULL);
 		PX_ASSERT(!mBufferUsed);
 		mSingle = ptr;
+		mListAccelerator = sm.allocate(1 * sizeof(void*));
+		mListAccelerator[0] = ptr;
 		mCount = 1;
 		mBufferUsed = true;
 		return;
@@ -131,7 +199,9 @@ void PtrTable::add(void* ptr, PtrTableStorageManager& sm)
 
 		void* single = mSingle;
 		mList = sm.allocate(2*sizeof(void*));
+		mListAccelerator = sm.allocate(2 * sizeof(void*));
 		mList[0] = single;
+		mListAccelerator[0] = single;
 		mBufferUsed = false;
 		mOwnsMemory = true;
 	} 
@@ -148,7 +218,9 @@ void PtrTable::add(void* ptr, PtrTableStorageManager& sm)
 		PX_ASSERT(mOwnsMemory);
 	}
 
-	mList[mCount++] = ptr;
+	mList[mCount] = ptr;
+	mListAccelerator[mCount++] = ptr;
+	qsort(mListAccelerator, mCount, sizeof(void*), comparePointers);
 }
 
 void PtrTable::replaceWithLast(PxU32 index, PtrTableStorageManager& sm)
@@ -161,6 +233,7 @@ void PtrTable::replaceWithLast(PxU32 index, PtrTableStorageManager& sm)
 		PX_ASSERT(mBufferUsed);
 
 		mList = NULL;
+		mListAccelerator = NULL;
 		mCount = 0;
 		mBufferUsed = false;
 	}
@@ -168,8 +241,11 @@ void PtrTable::replaceWithLast(PxU32 index, PtrTableStorageManager& sm)
 	{
 		PX_ASSERT(!mBufferUsed);
 		void* ptr = mList[1-index];
-		if(mOwnsMemory)
-			sm.deallocate(mList, 2*sizeof(void*));
+		if (mOwnsMemory)
+		{
+			sm.deallocate(mList, 2 * sizeof(void*));
+			sm.deallocate(mListAccelerator, 2 * sizeof(void*));
+		}
 		mSingle = ptr;
 		mCount = 1;
 		mBufferUsed = true;
@@ -179,7 +255,10 @@ void PtrTable::replaceWithLast(PxU32 index, PtrTableStorageManager& sm)
 	{
 		PX_ASSERT(!mBufferUsed);
 
-		mList[index] = mList[--mCount];								// remove before adjusting memory
+		mList[index] = mList[mCount - 1];								// remove before adjusting memory
+		mListAccelerator[index] = mListAccelerator[--mCount];		// remove before adjusting memory
+
+		qsort(mListAccelerator, mCount, sizeof(void*), comparePointers);
 
 		if(!mOwnsMemory)											// don't own the memory, must alloc
 			realloc(0, Ps::nextPowerOfTwo(PxU32(mCount)-1), sm);	// if currently a power of 2, don't jump to the next one
@@ -196,7 +275,7 @@ void Cm::PtrTable::getBinaryMetaData(PxOutputStream& stream)
 	PX_DEF_BIN_METADATA_CLASS(stream,	PtrTable)
 
 	PX_DEF_BIN_METADATA_ITEM(stream,	PtrTable, void,		mSingle,		PxMetaDataFlag::ePTR)		// PT: this is actually a union, beware
-	PX_DEF_BIN_METADATA_ITEM(stream,	PtrTable, PxU16,	mCount,			0)
+	PX_DEF_BIN_METADATA_ITEM(stream,	PtrTable, PxU32,	mCount,			0)
 	PX_DEF_BIN_METADATA_ITEM(stream,	PtrTable, bool,		mOwnsMemory,	0)
 	PX_DEF_BIN_METADATA_ITEM(stream,	PtrTable, bool,		mBufferUsed,	0)
 

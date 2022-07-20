@@ -34,6 +34,8 @@
 #include "common/PxPhysXCommonConfig.h"
 #include "CmPhysXCommon.h"
 
+#include <set>
+
 namespace physx
 {
 
@@ -108,8 +110,11 @@ struct PX_PHYSX_COMMON_API PtrTable
 	PtrTable(const PxEMPTY)
 	{
 		mOwnsMemory = mCount<2;
-		if(mCount == 0)
+		if (mCount == 0)
+		{
 			mList = NULL;
+			mListAccelerator = NULL;
+		}
 	}
 
 	void	exportExtraData(PxSerializationContext& stream);
@@ -126,10 +131,10 @@ private:
 		void**	mList;
 	};
 
-	PxU16	mCount;
+	PxU32	mCount;
 	bool	mOwnsMemory;
 	bool	mBufferUsed;		// dark magic in serialization requires this, otherwise redundant because it's logically equivalent to mCount == 1.
-
+	void**	mListAccelerator;
 };
 
 } // namespace Cm
