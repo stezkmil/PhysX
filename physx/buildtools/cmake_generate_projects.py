@@ -138,6 +138,10 @@ class CMakePreset:
                     print('VS16CL:' + os.environ['VS160CLPATH'])
                     outString = outString + ' -DCUDA_HOST_COMPILER=' + \
                         os.environ['VS160CLPATH']
+                if self.compiler == 'vc17':
+                    print('VS17CL:' + os.environ['VS170CLPATH'])
+                    outString = outString + ' -DCUDA_HOST_COMPILER=' + \
+                        os.environ['VS170CLPATH']
 
         return outString
 
@@ -157,6 +161,8 @@ class CMakePreset:
             outString = outString + '-G \"Visual Studio 15 2017\"'
         elif self.compiler == 'vc16':
             outString = outString + '-G \"Visual Studio 16 2019\"'
+        elif self.compiler == 'vc17':
+            outString = outString + '-G \"Visual Studio 17 2022\"'
         elif self.compiler == 'xcode':
             outString = outString + '-G Xcode'
         elif self.targetPlatform == 'android':
