@@ -77,61 +77,15 @@ void PtrTable::clear(PtrTableStorageManager& sm)
 	mCount = 0;
 }
 
-size_t bsearch2(
-	void const* const key,
-	void ** const base,
-	size_t            num,
-	int (* const compare)(void const*, void const*)
-)
-{
-	size_t lo = 0;
-	size_t hi = num - 1;
-
-	while (base[lo] <= base[hi])
-	{
-		size_t const half = num / 2;
-		if (half != 0)
-		{
-			size_t mid = lo + (num & 1 ? half : (half - 1));
-
-			int const result = compare(key, base[mid]);
-			if (result == 0)
-			{
-				return mid;
-			}
-			else if (result < 0)
-			{
-				num = num & 1 ? half : half - 1;
-			}
-			else
-			{
-				num = half;
-			}
-		}
-		else if (num != 0)
-		{
-			return compare(key, base[lo]) ? -1 : lo;
-		}
-		else
-		{
-			break;
-		}
-	}
-
-	return std::numeric_limits<size_t>::max();
-}
-
 PxU32 PtrTable::find(const void* ptr) const
 {
 	const PxU32 nbPtrs = mCount;
 
-	size_t index = bsearch2(ptr, mListAccelerator, nbPtrs, comparePointers);
-	if (index == std::numeric_limits<size_t>::max())
+	auto res = std::lower_bound(mListAccelerator, mListAccelerator + nbPtrs, ptr);
+	if (res == mListAccelerator + nbPtrs)
 		return 0xffffffff;
 	else
-	{
-		return static_cast<PxU32>(index);
-	}
+		return static_cast<PxU32>(std::distance(mListAccelerator, res));
 }
 
 void PtrTable::exportExtraData(PxSerializationContext& stream)
