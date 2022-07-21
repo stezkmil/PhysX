@@ -34,6 +34,8 @@
 #include "CmUtils.h"
 #include "PsBitUtils.h"
 
+#include <algorithm>
+
 using namespace physx;
 using namespace Cm;
 
@@ -51,6 +53,7 @@ PtrTable::PtrTable()
 , mOwnsMemory(true)
 , mBufferUsed(false)
 , mListAccelerator(NULL)
+, sorted(false)
 {
 }
 
@@ -59,6 +62,9 @@ PtrTable::~PtrTable()
 	PX_ASSERT(mOwnsMemory);
 	PX_ASSERT(mCount == 0);
 	PX_ASSERT(mList == NULL);
+	if (mListAccelerator)
+		delete[] mListAccelerator;
+	mListAccelerator = NULL;
 	PX_ASSERT(mListAccelerator == NULL);
 }
 
@@ -68,18 +74,28 @@ void PtrTable::clear(PtrTableStorageManager& sm)
 	{
 		PxU32 implicitCapacity = Ps::nextPowerOfTwo(PxU32(mCount)-1);
 		sm.deallocate(mList, sizeof(void*)*implicitCapacity);
-		sm.deallocate(mListAccelerator, sizeof(void*) * implicitCapacity);
 	}
 
 	mList = NULL;
 	mListAccelerator = NULL;
 	mOwnsMemory = true;
 	mCount = 0;
+	sorted = false;
 }
 
 PxU32 PtrTable::find(const void* ptr) const
 {
 	const PxU32 nbPtrs = mCount;
+
+	if (!sorted)
+	{
+		if (mListAccelerator)
+			delete[] mListAccelerator;
+		mListAccelerator = new void* [mCount];
+		PxMemCopy(mListAccelerator, mList, mCount * sizeof(void*));
+		std::sort(mListAccelerator, mListAccelerator + mCount);
+		sorted = true;
+	}
 
 	auto res = std::lower_bound(mListAccelerator, mListAccelerator + nbPtrs, ptr);
 	if (res == mListAccelerator + nbPtrs)
@@ -99,10 +115,11 @@ void PtrTable::exportExtraData(PxSerializationContext& stream)
 
 void PtrTable::importExtraData(PxDeserializationContext& context)
 {
-	if(mCount>1)
+	if (mCount > 1)
+	{
 		mList = context.readExtraData<void*, PX_SERIAL_ALIGN>(mCount);
-	PxMemCopy(mListAccelerator, mList, mCount * sizeof(void*));
-	qsort(mListAccelerator, mCount, sizeof(void*), comparePointers);
+	}
+	sorted = false;
 }
 
 void PtrTable::realloc(PxU32 oldCapacity, PxU32 newCapacity, PtrTableStorageManager& sm)
@@ -116,17 +133,12 @@ void PtrTable::realloc(PxU32 oldCapacity, PxU32 newCapacity, PtrTableStorageMana
 	void** newMem = sm.allocate(newCapacity * sizeof(void*));
 	PxMemCopy(newMem, mList, mCount * sizeof(void*));
 
-	void** newMemAccel = sm.allocate(newCapacity * sizeof(void*));
-	PxMemCopy(newMemAccel, mListAccelerator, mCount * sizeof(void*));
-
 	if (mOwnsMemory)
 	{
 		sm.deallocate(mList, oldCapacity * sizeof(void*));
-		sm.deallocate(mListAccelerator, oldCapacity * sizeof(void*));
 	}
 
 	mList = newMem;
-	mListAccelerator = newMemAccel;
 	mOwnsMemory = true;
 }
 
@@ -136,11 +148,8 @@ void PtrTable::add(void* ptr, PtrTableStorageManager& sm)
 	{
 		PX_ASSERT(mOwnsMemory);
 		PX_ASSERT(mList == NULL);
-		PX_ASSERT(mListAccelerator == NULL);
 		PX_ASSERT(!mBufferUsed);
 		mSingle = ptr;
-		mListAccelerator = sm.allocate(1 * sizeof(void*));
-		mListAccelerator[0] = ptr;
 		mCount = 1;
 		mBufferUsed = true;
 		return;
@@ -153,9 +162,7 @@ void PtrTable::add(void* ptr, PtrTableStorageManager& sm)
 
 		void* single = mSingle;
 		mList = sm.allocate(2*sizeof(void*));
-		mListAccelerator = sm.allocate(2 * sizeof(void*));
 		mList[0] = single;
-		mListAccelerator[0] = single;
 		mBufferUsed = false;
 		mOwnsMemory = true;
 	} 
@@ -172,9 +179,8 @@ void PtrTable::add(void* ptr, PtrTableStorageManager& sm)
 		PX_ASSERT(mOwnsMemory);
 	}
 
-	mList[mCount] = ptr;
-	mListAccelerator[mCount++] = ptr;
-	qsort(mListAccelerator, mCount, sizeof(void*), comparePointers);
+	mList[mCount++] = ptr;
+	sorted = false;
 }
 
 void PtrTable::replaceWithLast(PxU32 index, PtrTableStorageManager& sm)
@@ -187,7 +193,6 @@ void PtrTable::replaceWithLast(PxU32 index, PtrTableStorageManager& sm)
 		PX_ASSERT(mBufferUsed);
 
 		mList = NULL;
-		mListAccelerator = NULL;
 		mCount = 0;
 		mBufferUsed = false;
 	}
@@ -198,21 +203,20 @@ void PtrTable::replaceWithLast(PxU32 index, PtrTableStorageManager& sm)
 		if (mOwnsMemory)
 		{
 			sm.deallocate(mList, 2 * sizeof(void*));
-			sm.deallocate(mListAccelerator, 2 * sizeof(void*));
 		}
 		mSingle = ptr;
 		mCount = 1;
 		mBufferUsed = true;
 		mOwnsMemory = true;
+		sorted = false;
 	} 
 	else
 	{
 		PX_ASSERT(!mBufferUsed);
 
-		mList[index] = mList[mCount - 1];								// remove before adjusting memory
-		mListAccelerator[index] = mListAccelerator[--mCount];		// remove before adjusting memory
+		mList[index] = mList[--mCount];								// remove before adjusting memory
 
-		qsort(mListAccelerator, mCount, sizeof(void*), comparePointers);
+		sorted = false;
 
 		if(!mOwnsMemory)											// don't own the memory, must alloc
 			realloc(0, Ps::nextPowerOfTwo(PxU32(mCount)-1), sm);	// if currently a power of 2, don't jump to the next one

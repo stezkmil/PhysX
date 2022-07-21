@@ -101,6 +101,7 @@ struct PX_PHYSX_COMMON_API PtrTable
 
 	PX_FORCE_INLINE PxU32		getCount()	const	{ return mCount; }
 	PX_FORCE_INLINE	void*const*	getPtrs()	const	{ return mCount == 1 ? &mSingle : mList;	}
+	// This is another candidate for sorted = false, if any problems are observed
 	PX_FORCE_INLINE	void**		getPtrs()			{ return mCount == 1 ? &mSingle : mList;	}
 
 
@@ -113,8 +114,9 @@ struct PX_PHYSX_COMMON_API PtrTable
 		if (mCount == 0)
 		{
 			mList = NULL;
-			mListAccelerator = NULL;
 		}
+		mListAccelerator = NULL;
+		sorted = false;
 	}
 
 	void	exportExtraData(PxSerializationContext& stream);
@@ -134,7 +136,8 @@ private:
 	PxU32	mCount;
 	bool	mOwnsMemory;
 	bool	mBufferUsed;		// dark magic in serialization requires this, otherwise redundant because it's logically equivalent to mCount == 1.
-	void**	mListAccelerator;
+	mutable void**	mListAccelerator;
+	mutable bool	sorted;
 };
 
 } // namespace Cm
