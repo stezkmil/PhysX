@@ -216,7 +216,7 @@ bool TetrahedronMeshBuilder::importMesh(const PxTetrahedronMeshDesc& collisionMe
 			dest->v[0] = tet16[0];
 			dest->v[1] = tet16[1];
 			dest->v[2] = tet16[2];
-			dest->v[3] = tet16[3];
+			dest->v[3] = tet16[collisionMeshDesc.triangleCollisionMesh ? 2 : 3];
 			dest++;
 			source += collisionMeshDesc.tetrahedrons.stride;
 		}
@@ -229,11 +229,14 @@ bool TetrahedronMeshBuilder::importMesh(const PxTetrahedronMeshDesc& collisionMe
 			dest->v[0] = tet32[0];
 			dest->v[1] = tet32[1];
 			dest->v[2] = tet32[2];
-			dest->v[3] = tet32[3];
+			dest->v[3] = tet32[collisionMeshDesc.triangleCollisionMesh ? 2 : 3];
 			dest++;
 			source += collisionMeshDesc.tetrahedrons.stride;
 		}
 	}
+
+    if (collisionMeshDesc.triangleCollisionMesh && !collisionMesh.checkTetrahedronIndices())
+        return PxGetFoundation().error(PxErrorCode::eINVALID_PARAMETER, PX_FL, "Invalid triangle collision indices.");
 
 #if PX_CHECKED
 	if (!collisionMesh.checkTetrahedronIndices())
@@ -288,6 +291,8 @@ bool TetrahedronMeshBuilder::createGRBMidPhaseAndData(const PxU32 originalTetrah
 		for(PxU32 i = 0; i < collisionMesh.mNbTetrahedrons; ++i)
 		{
 			IndTetrahedron32& tetInd = dest[i];
+            if (tetInd.mRef[2] == tetInd.mRef[3])
+                continue;
 
 			SortedTriangleInds t0(tetInd.mRef[0], tetInd.mRef[1], tetInd.mRef[2]);
 			t0.setTetIndex(i);
@@ -309,6 +314,9 @@ bool TetrahedronMeshBuilder::createGRBMidPhaseAndData(const PxU32 originalTetrah
 		PxMemZero(collisionData.mGRB_tetraSurfaceHint, collisionMesh.mNbTetrahedrons * sizeof(PxU8));
 
 		PxU8* tetHint = reinterpret_cast<PxU8*>(collisionData.mGRB_tetraSurfaceHint);
+        for (PxU32 i = 0; i < collisionMesh.mNbTetrahedrons; ++i)
+            if (dest[i].mRef[2] == dest[i].mRef[3])
+                tetHint[i] = 0x81; // Explicit triangle, face 012 only; no artificial fourth vertex.
 
 		//compute the surface triangles for the tetrahedron mesh
 		for (PxHashMap<SortedTriangleInds, PxU32, SortedTriangleIndsHash>::Iterator iter = triIndsMap.getIterator(); !iter.done(); ++iter)
@@ -1650,6 +1658,13 @@ static bool gOverlapCallback(const AABBTreeNode* current, PxU32 /*depth*/, void*
 			const PxVec3 b1 = verts[tetrahedron.mRef[1]];
 			const PxVec3 b2 = verts[tetrahedron.mRef[2]];
 			const PxVec3 b3 = verts[tetrahedron.mRef[3]];
+            if (colTetInd.mRef[2] == colTetInd.mRef[3])
+            {
+                const PxBounds3 simBounds(b0.minimum(b1.minimum(b2.minimum(b3))), b0.maximum(b1.maximum(b2.maximum(b3))));
+                if (bound.intersects(simBounds))
+                    Data->mSimTetraIndices.pushBack(tetId);
+                continue;
+            }
 			const PxVec3 center1 = (b0 + b1 + b2 + b3) * 0.25f;
 
 			const PxVec3 dir = center1 - center0;
@@ -2151,6 +2166,19 @@ bool TetrahedronMeshBuilder::computeModelsMapping(TetrahedronMeshData& simulatio
 
 			aabbTree.walk(gOverlapCallback, &result);
 
+            if (tetInd.mRef[2] == tetInd.mRef[3])
+            {
+                // Include vertex embeddings even for surfaces extending outside the simulation volume.
+                for (PxU32 v = 0; v < 3; ++v)
+                {
+                    const PxU32 simTet = mappingData.mVertsRemapInGridModel[tetInd.mRef[v]];
+                    bool found = false;
+                    for (PxU32 j = 0; j < result.mSimTetraIndices.size(); ++j)
+                        found |= result.mSimTetraIndices[j] == simTet;
+                    if (!found)
+                        result.mSimTetraIndices.pushBack(simTet);
+                }
+            }
 			const PxU32 size = result.mSimTetraIndices.size();
 
 			PX_ASSERT(size > 0);
@@ -2422,6 +2450,8 @@ void TetrahedronMeshBuilder::computeSimData(const PxTetrahedronMeshDesc& desc, T
 bool TetrahedronMeshBuilder::computeCollisionData(const PxTetrahedronMeshDesc& collisionMeshDesc, TetrahedronMeshData& collisionMesh, DeformableVolumeCollisionData& collisionData,
 	const PxCookingParams&	params, bool validateMesh)
 {
+    if (collisionMeshDesc.triangleCollisionMesh && (!collisionMeshDesc.isValid() || !params.buildGPUData))
+        return PxGetFoundation().error(PxErrorCode::eINVALID_PARAMETER, PX_FL, "Triangle collision requires a valid indexed descriptor and GPU cooking data.");
 	const PxU32 originalTetrahedronCount = collisionMeshDesc.tetrahedrons.count;
 	// Create a local copy that we can modify
 	PxTetrahedronMeshDesc desc = collisionMeshDesc;
@@ -2473,7 +2503,13 @@ bool TetrahedronMeshBuilder::computeCollisionData(const PxTetrahedronMeshDesc& c
 		return false;
 	
 	// Use collisionData.mGRB_primIndices rather than collisionMesh.mTetrahedrons: we want rest poses for the topology-remapped mesh, which is the actual one in simulation.
-	computeRestPoseAndPointMass(reinterpret_cast<TetrahedronT<PxU32>*>(collisionData.mGRB_primIndices), collisionMesh.mNbTetrahedrons, collisionMesh.mVertices, NULL, collisionData.mTetraRestPoses);
+    if (collisionMeshDesc.triangleCollisionMesh)
+    {
+        for (PxU32 i = 0; i < collisionMesh.mNbTetrahedrons; ++i)
+            collisionData.mTetraRestPoses[i] = PxMat33(PxIdentity);
+    }
+    else
+	    computeRestPoseAndPointMass(reinterpret_cast<TetrahedronT<PxU32>*>(collisionData.mGRB_primIndices), collisionMesh.mNbTetrahedrons, collisionMesh.mVertices, NULL, collisionData.mTetraRestPoses);
 
 	return true;
 }
@@ -2482,7 +2518,7 @@ bool TetrahedronMeshBuilder::loadFromDesc(const PxTetrahedronMeshDesc& simulatio
 	PxDeformableVolumeSimulationDataDesc deformableVolumeDataDesc, TetrahedronMeshData& simulationMesh, DeformableVolumeSimulationData& simulationData,
 	TetrahedronMeshData& collisionMesh, DeformableVolumeCollisionData& collisionData, CollisionMeshMappingData& mappingData, const PxCookingParams&	params, bool validateMesh)
 {
-	if (!simulationMeshDesc.isValid() || !collisionMeshDesc.isValid() || !deformableVolumeDataDesc.isValid())
+	if (simulationMeshDesc.triangleCollisionMesh || !simulationMeshDesc.isValid() || !collisionMeshDesc.isValid() || !deformableVolumeDataDesc.isValid())
 		return PxGetFoundation().error(PxErrorCode::eINVALID_PARAMETER, PX_FL, "TetrahedronMesh::loadFromDesc: desc.isValid() failed!");
 
 	// verify the mesh params
@@ -3024,6 +3060,11 @@ PxCollisionTetrahedronMeshData* immediateCooking::computeCollisionData(const PxC
 
 PxSimulationTetrahedronMeshData* immediateCooking::computeSimulationData(const PxCookingParams& params, const PxTetrahedronMeshDesc& simulationMeshDesc)
 {
+    if (simulationMeshDesc.triangleCollisionMesh)
+    {
+        PxGetFoundation().error(PxErrorCode::eINVALID_PARAMETER, PX_FL, "Triangle collision descriptors cannot be used for simulation meshes.");
+        return NULL;
+    }
 	TetrahedronMeshData* mesh = PX_NEW(TetrahedronMeshData);
 	DeformableVolumeSimulationData* simulationData = PX_NEW(DeformableVolumeSimulationData);
 	//KS - This really needs the collision mesh as well. 

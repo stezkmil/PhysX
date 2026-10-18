@@ -38,6 +38,7 @@
 
 #include "bv32Traversal.cuh"
 #include "triangleMesh.cuh"
+#include "triangletriangle.cuh"
 #include "sdfCollision.cuh"
 #include "reduction.cuh"
 
@@ -95,6 +96,7 @@ struct TriangleLeafBoundMinMaxTraverser
 {
 	femMidphaseScratch* PX_RESTRICT s_warpScratch;
 	Tetrahedron* mTet;
+	const Triangle* mTriangle;
 	const PxVec3 tMin;
 	PxReal mBestDistance;
 	const PxVec3 tMax;
@@ -104,8 +106,8 @@ struct TriangleLeafBoundMinMaxTraverser
 	PX_FORCE_INLINE __device__ TriangleLeafBoundMinMaxTraverser(
 		femMidphaseScratch* PX_RESTRICT s_warpScratch,
 		const PxBounds3 tetBound,
-		const PxReal contactDistance, Tetrahedron* tet) :
-		mContactDistance(contactDistance), mTet(tet), mBestDistance(PX_MAX_F32), mPrimIndex(0xFFFFFFFF), tMin(tetBound.minimum), tMax(tetBound.maximum),
+		const PxReal contactDistance, Tetrahedron* tet, const Triangle* triangle = NULL) :
+		mContactDistance(contactDistance), mTet(tet), mTriangle(triangle), mBestDistance(PX_MAX_F32), mPrimIndex(0xFFFFFFFF), tMin(tetBound.minimum), tMax(tetBound.maximum),
 		s_warpScratch(s_warpScratch)
 	{ }
 
@@ -122,6 +124,19 @@ struct TriangleLeafBoundMinMaxTraverser
 			const PxVec3 v2 = PxLoad3(trimeshVerts[triIdx.z]);
 
 			PxPlane triPlane(v0, v1, v2);
+            if (mTriangle)
+            {
+                Triangle other;
+                other.verts[0]=v0; other.verts[1]=v1; other.verts[2]=v2;
+                other.triPlane=triPlane; other.centroid=(v0+v1+v2)/3.f;
+                if (triPlane.distance(mTriangle->centroid)>=0.f)
+                {
+                    const PxReal separation=satIntersect<true>(*mTriangle,other,PxMin(mBestDistance,mContactDistance));
+                    if (separation<mBestDistance) { mBestDistance=separation; mPrimIndex=primitiveIndex; }
+                }
+                return;
+            }
+
 
 			if (triPlane.distance(mTet->centroid) >= 0.f)
 			{
@@ -538,7 +553,29 @@ struct SbSbMeshTreeTraverser
 					PxVec3 c = PxLoad3(s_warpScratch->meshVerts[tetIdx1.z]);
 					PxVec3 d = PxLoad3(s_warpScratch->meshVerts[tetIdx1.w]);
 
-					if (isValidTet(a, b, c, d))
+                    if (hint & 0x80)
+                    {
+                        const PxVec3 ab = b - a;
+                        const PxVec3 ac = c - a;
+                        const PxVec3 faceNormal = ab.cross(ac);
+                        const PxReal areaSquared = faceNormal.magnitudeSquared();
+                        if (areaSquared > 0.f && PxIsFinite(areaSquared))
+                        {
+                            closestP = closestPtPointTriangle2(point, a, b, c, ab, ac);
+                            const PxVec3 delta = point - closestP;
+                            const PxReal distanceSquared = delta.magnitudeSquared();
+                            if (distanceSquared < distance * distance)
+                            {
+                                const PxReal length = PxSqrt(distanceSquared);
+                                const PxReal side = delta.dot(faceNormal) < 0.f ? -1.f : 1.f;
+                                dist = side * length;
+                                // Closed surfaces retain their outward normal after a small crossing.
+                                normal = length > 1e-10f ? delta * (side / length) : faceNormal / PxSqrt(areaSquared);
+                                bHasCollision = true;
+                            }
+                        }
+                    }
+                    else if (isValidTet(a, b, c, d))
 					{
 
 						inside = isPointOutsideOfPlane4(point, a, b, c, d);
@@ -571,7 +608,7 @@ struct SbSbMeshTreeTraverser
 					}*/
 			}
 
-			if (bHasCollision && dist < bestDist)
+			if (bHasCollision && ((hint & 0x80) ? PxAbs(dist) < PxAbs(bestDist) : dist < bestDist))
 			{
 				bestDist = dist;
 				bestNormal = normal;
@@ -605,7 +642,8 @@ struct SbSbMeshTreeTraverser
 		const PxU32 idxInWarp = threadIdx.x & 31;
 
 		PxReal sep;
-		PxU32 winnerLane = minIndex(bestDist, FULL_MASK, sep);
+		const bool triangleMesh = (surfaceTetHint1[0] & 0x80) != 0;
+		PxU32 winnerLane = minIndex(triangleMesh ? PxAbs(bestDist) : bestDist, FULL_MASK, sep);
 
 		if (winnerLane == idxInWarp && bestDist < distance)
 		{
@@ -1025,7 +1063,17 @@ __device__ static inline void sb_trimeshMidphaseCore(
 				const PxVec3 v2 = shape2Vertex(trimeshToWorld.transformInv(worldV2), trimeshScale.scale, trimeshScale.rotation);
 				const PxVec3 v3 = shape2Vertex(trimeshToWorld.transformInv(worldV3), trimeshScale.scale, trimeshScale.rotation);
 
-				if (computeTetBoundWithTetrahedron(v0, v1, v2, v3, tetBoundInTrimeshVertexSpace, tets[threadIdx.y]))
+                Triangle exactTriangle;
+                const bool exactSurface=(hint & 0x80)!=0;
+                if (exactSurface)
+                {
+                    if ((v1-v0).cross(v2-v0).magnitudeSquared() <= 1e-20f)
+                        continue;
+                    exactTriangle.verts[0]=v0; exactTriangle.verts[1]=v1; exactTriangle.verts[2]=v2;
+                    exactTriangle.triPlane=PxPlane(v0,v1,v2); exactTriangle.centroid=(v0+v1+v2)/3.f;
+                    tetBoundInTrimeshVertexSpace=PxBounds3(v0.minimum(v1).minimum(v2),v0.maximum(v1).maximum(v2));
+                }
+                if (exactSurface || computeTetBoundWithTetrahedron(v0, v1, v2, v3, tetBoundInTrimeshVertexSpace, tets[threadIdx.y]))
 				{
 
 					
@@ -1033,7 +1081,7 @@ __device__ static inline void sb_trimeshMidphaseCore(
 					const PxU32 stackSize = stackSizeBytes / sizeof(uint4);				
 					TriangleLeafBoundMinMaxTraverser<true> minMaxTest(s_warpScratch,
 						tetBoundInTrimeshVertexSpace,						
-						contactDist, &tets[threadIdx.y]);
+						contactDist, &tets[threadIdx.y], exactSurface ? &exactTriangle : NULL);
 					bv32TreeTraversal<TriangleLeafBoundMinMaxTraverser<true>, WarpsPerBlock>(s_warpScratch->bv32PackedNodes, s_warpScratch->sBv32Nodes, minMaxTest);
 
 					const PxU32 MaxContacts = 4;

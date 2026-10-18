@@ -164,6 +164,18 @@ void CUDARTAPI __cudaRegisterFunction(void** fatCubinHandle, const char*,
 	PxGpuCudaRegisterFunction((int)(size_t) fatCubinHandle, deviceName);
 }
 
+#if CUDA_VERSION >= 13000
+// NVCC 13 emits these Runtime entry points; PhysX launches through the Driver API.
+extern "C" cudaError_t CUDARTAPI __cudaGetKernel(cudaKernel_t*, const void*)
+{
+    return cudaErrorNotSupported;
+}
+extern "C" cudaError_t CUDARTAPI __cudaLaunchKernel(cudaKernel_t, dim3, dim3, void**, size_t, cudaStream_t)
+{
+    return cudaErrorNotSupported;
+}
+#endif
+
 /* These functions are implemented just to resolve link dependencies */
 
 extern "C"

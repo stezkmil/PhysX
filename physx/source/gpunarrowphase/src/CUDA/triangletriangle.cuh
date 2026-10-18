@@ -20,7 +20,7 @@ struct Triangle
 };
 
 
-__device__ PxReal minProject(const PxPlane& plane, const Triangle& triangle)
+__device__ inline PxReal minProject(const PxPlane& plane, const Triangle& triangle)
 {
 	/*return PxMin(plane.distance(tet.verts[0]), PxMin(plane.distance(tet.verts[1]),
 		PxMin(plane.distance(tet.verts[2]), plane.distance(tet.verts[3]))));*/

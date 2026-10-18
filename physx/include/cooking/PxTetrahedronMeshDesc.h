@@ -89,6 +89,10 @@ namespace physx
 		*/
 		PxU16 tetsPerElement;
 
+        // Experimental: indexed triangles in tetrahedrons (three indices per primitive).
+        // Collision mesh only: volume-volume and non-SDF static triangle meshes; no self-collision.
+        bool triangleCollisionMesh = false;
+
 		/**
 		\brief Constructor to build an empty tetmesh description
 		*/
@@ -127,6 +131,14 @@ namespace physx
 
 		PX_INLINE bool isValid() const
 		{
+            if (triangleCollisionMesh)
+            {
+                const PxU32 indexSize = (flags & PxMeshFlag::e16_BIT_INDICES) ? sizeof(PxU16) : sizeof(PxU32);
+                return points.count >= 3 && points.data && points.stride >= sizeof(PxVec3)
+                    && tetrahedrons.count && tetrahedrons.data && tetrahedrons.stride >= 3 * indexSize
+                    && tetsPerElement == 1 && !(points.count > 0xffff && flags & PxMeshFlag::e16_BIT_INDICES)
+                    && (!materialIndices.data || materialIndices.stride >= sizeof(PxDeformableMaterialTableIndex));
+            }
 			// Check geometry of the collision mesh
 			if (points.count < 4) 	//at least 1 tetrahedron's worth of points
 				return false;

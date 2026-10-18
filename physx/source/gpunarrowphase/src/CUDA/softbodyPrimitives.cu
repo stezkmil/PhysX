@@ -711,7 +711,14 @@ __device__ static inline void sbMeshCollision(
 	}
 
 	PxVec3 tetCenter;
-	const PxReal innerSphere = computeInnerSphere(v, tetCenter);
+	const bool exactSurface=(softbody.mTetMeshSurfaceHint[tetrahedronInd] & 0x80)!=0;
+    PxReal innerSphere=0.000001f;
+    if (exactSurface)
+    {
+        __syncwarp();
+        tetCenter=(ss_scratch.vA[0]+ss_scratch.vA[1]+ss_scratch.vA[2])/3.f;
+    }
+    else innerSphere=computeInnerSphere(v,tetCenter);
 
 	const uint4 triIdx = s_warpScratch->tetmeshTetIndices[1][triangleInd];
 	const uint* triIdxf = reinterpret_cast<const uint*>(&triIdx);
@@ -804,7 +811,7 @@ __device__ static inline void sbMeshCollision(
 		ss_scratch.tetIndex0 = tetrahedronInd;
 		ss_scratch.tetIndex1 = triangleInd;
 
-		ss_scratch.nbVertices0 = 4;
+		ss_scratch.nbVertices0 = exactSurface ? 3 : 4;
 		ss_scratch.inSphereRadius0 = innerSphere;
 
 		ss_scratch.nbVertices1 = 3;

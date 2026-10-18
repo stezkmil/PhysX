@@ -1513,13 +1513,12 @@ void sb_gm_cp_averageVertsLaunch(
 		float4* gridModelVels = shSoftbody.mSimVelocity_InvMass;
 		float4* deltaPos = shSoftbody.mSimDeltaPos;
 
-		const float4* PX_RESTRICT curPositions = shSoftbody.mSimPosition_InvMassCP;
 
 		const PxU32* PX_RESTRICT accumulatedCopies = shSoftbody.mSimAccumulatedCopiesCP;
 		
 		const PxU32 offset = numElements * numVertsPerElement;
 
-		const float4* accumulatedPoses = &curPositions[offset];
+		const float4* accumulatedVels = &shSoftbody.mSimVelocity_invMassCP[offset];
 
 		const float4 pos_invMass = gridModelPoses[groupThreadIdx];
 
@@ -1528,11 +1527,11 @@ void sb_gm_cp_averageVertsLaunch(
 			const PxU32 startInd = groupThreadIdx == 0 ? 0 : accumulatedCopies[groupThreadIdx - 1];
 			const PxU32 endInd = accumulatedCopies[groupThreadIdx];
 
-			float4 diff = accumulatedPoses[startInd] - pos_invMass;
+			float4 diff = accumulatedVels[startInd] - gridModelVels[groupThreadIdx];
 
 			for (PxU32 j = startInd + 1; j < endInd; ++j)
 			{
-				float4 newDiff = accumulatedPoses[j] - pos_invMass;
+				float4 newDiff = accumulatedVels[j] - gridModelVels[groupThreadIdx];
 				diff += newDiff;
 			}
 
@@ -1541,9 +1540,10 @@ void sb_gm_cp_averageVertsLaunch(
 
 			diff.w = 0.f;
 
-			float4 averageDelta = diff * scale;
+			// Avoid subtracting rounded world positions to recover tiny solver corrections.
+			float4 averageDelta = diff * (scale / invDt);
 			float4 averagePos = pos_invMass + averageDelta;
-			const float4 averageVel = gridModelVels[groupThreadIdx] + averageDelta * invDt;
+			const float4 averageVel = gridModelVels[groupThreadIdx] + diff * scale;
 
 			gridModelPoses[groupThreadIdx] = averagePos;
 			gridModelVels[groupThreadIdx] = make_float4(averageVel.x, averageVel.y, averageVel.z, pos_invMass.w);
